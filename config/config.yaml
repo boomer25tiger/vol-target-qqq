@@ -1,0 +1,276 @@
+# Frozen configuration for the vol-targeted QQQ study.
+# Commit this file before the first backtest run and cite the commit hash in the
+# write-up. Nothing in src/ may hard-code a value that belongs here.
+#
+# Parameters under `frozen:` are pre-specified. Changing one invalidates the
+# pre-specification and requires a dated entry in SPEC.md Section 13.
+
+meta:
+  project: vol-target-qqq
+  spec_version: "1.0"
+  spec_frozen_date: "2026-08-06"
+  random_seed: 20260806
+
+frozen:
+  underlying: QQQ
+  return_type: total_return          # dividends reinvested
+  eval_start: "2000-01-03"
+  eval_end: null                     # null = most recent complete month
+  rebalance:
+    frequency: monthly
+    timing: last_trading_day_close
+  target_vol: 0.20                   # annualized
+  leverage_cap: 2.0
+  leverage_floor: 0.0                # no shorting
+  starting_capital: 100000
+  financing:
+    borrow_reference: DFF            # FRED effective fed funds, daily
+    borrow_spread: 0.0050            # 50bp over the reference
+    cash_credit_reference: DFF       # credited on the uninvested fraction
+    cash_credit_spread: 0.0
+  transaction_cost:
+    round_trip: 0.0002               # 2bp on traded notional
+    applied_to: drifted_weight_delta
+  forecast_horizon_days: 21
+  surface_tenors: [21, 63, 126, 252]
+  rv_primary_sampling_minutes: 5
+
+data:
+  intraday_source:
+    repo_id: mito0o852/OHLCV-1m
+    repo_type: dataset
+    status: deferred_transfer_cost   # coverage OK (Phase 2A); ~84 GB to extract (Phase 2B)
+    tickers: [QQQ, QQQQ]
+    file_pattern: "data/ohlcv_{month}.parquet"
+    split_adjusted: false            # confirmed by repo owner
+  daily_source:
+    ticker: QQQ
+    vendor: "yahoo (yfinance), cross-checked against stooq"
+    start: "1999-03-10"
+  seed_source:                       # GARCH-family seed: close-to-close returns
+    symbol: NDX
+    vendor: "yahoo (yfinance), cross-checked against stooq"
+    start: "1985-01-01"
+    end: "1999-03-09"
+    purpose: estimation_burn_in_only # never part of the traded series
+  range_seed_source:                 # RV-family range-estimator seed (SPEC 13, 2026-08-06)
+    symbol: IXIC                     # ^IXIC Nasdaq Composite; clean OHLC opens
+    vendor: "yahoo (yfinance)"
+    start: "1986-01-01"              # open==prior-close < 5% from 1986; see seed_diagnostic
+    end: "1999-03-09"                # QQQ realized measures take over 1999-03-10
+    purpose: rv_family_seed_only     # never part of the traded series
+  financing_source:
+    provider: FRED
+    series: DFF
+  calendar:
+    exchange: NYSE
+    timezone: America/New_York
+    rth_open: "09:30"
+    rth_close: "16:00"
+    full_session_bars: 390
+    half_session_bars: 210
+  corporate_actions:
+    known_splits:
+      "2000-03-20": 2.0              # QQQ 2-for-1; verify independently
+    ticker_history:
+      - {symbol: QQQ,  start: "1999-03-10", end: "2004-11-30"}
+      - {symbol: QQQQ, start: "2004-12-01", end: "2011-03-23"}
+      - {symbol: QQQ,  start: "2011-03-24", end: null}
+
+realized_measures:
+  # Intraday source deferred (transfer cost; see validation_results). The daily
+  # Yang-Zhang fallback is the ACTIVE construction. See SPEC.md Sections 3.4 & 4.
+  active_construction: fallback_if_gate_fails
+  primary:
+    status: deferred                 # needs the intraday source; not built this phase
+    intraday_sampling_minutes: 5
+    session: rth_only
+    add_overnight_squared_return: true
+  robustness:                        # tsrv & realized_kernel need intraday data -> deferred
+    - tsrv                           # Zhang, Mykland, Ait-Sahalia (2005)
+    - realized_kernel                # Barndorff-Nielsen et al. (2008)
+  signature_plot_minutes: [1, 2, 3, 5, 10, 15, 20, 30]
+  fallback_if_gate_fails:            # SPEC.md Section 3.4 -- ACTIVE construction
+    status: active
+    target_estimator: yang_zhang
+    target_window_days: 21
+    daily_proxy: overnight_squared_plus_rogers_satchell
+    drop_robustness: [tsrv, realized_kernel]
+  seed:                              # RV-family estimation seed (SPEC 13, 2026-08-06)
+    range_estimator_symbol: IXIC     # ^IXIC Nasdaq Composite (clean OHLC opens)
+    start: "1986-01-01"              # < 5% mechanical opens from 1986; see seed_diagnostic
+    end: "1999-03-09"                # QQQ realized measures take over 1999-03-10
+    yz_window_days: 21               # rolling Yang-Zhang window = forecast_horizon_days
+    daily_proxy: overnight_squared_plus_rogers_satchell
+    level_match:                     # one shared unconditional vol level for both families
+      method: single_scalar
+      match_to: NDX_close_to_close
+      formula: "c = var(NDX_cc_returns) / mean(IXIC_daily_RV), over the seed window"
+      include_october_1987: true     # DEFAULT; do not exclude on own initiative
+      # computed c is data-derived; cached in data/processed/rv_panel.meta.json
+
+acceptance_gate:                     # SPEC.md Section 3.4
+  min_session_coverage: 0.95
+  min_pct_sessions_with_380_bars: 0.90
+  min_half_day_bars: 200
+  max_ticker_changeover_gap_sessions: 3
+  signature_ratio_1min_over_5min: {min: 1.05, max: 2.50}
+  rv_vs_close_to_close_tolerance: 0.10
+  max_ohlc_integrity_violation_rate: 0.01
+
+# Results of the Session 1 intraday data-source validation (SPEC.md Section 3.4).
+# The gate was NOT run to completion: Phase 2A confirmed QQQ/QQQQ coverage cheaply
+# (ticker column only), but Phase 2B showed the monthly files are unsorted by
+# ticker, so extracting QQQ/QQQQ requires transferring the whole ~84 GB repo. The
+# source is therefore deferred (not rejected), and the downstream gate criteria
+# (bar counts, split reconciliation, signature plot, RV-vs-daily) were never
+# evaluated on real data.
+validation_results:
+  date: "2026-08-06"
+  intraday_gate_status: not_completed        # coverage confirmed; extraction deferred
+  phase_2a_coverage:                          # ticker column only; 1.1 MB total transfer
+    note: "raw rows/month include extended hours; QQQ trades as QQQQ 2004-12..2011-03"
+    columns: [month, file_mb, total_rows, distinct_tickers, qqq_rows, qqqq_rows]
+    rows:
+      - ["1999-04",  97.8, 11086824, 10300,  8161,     0]
+      - ["1999-12", 124.8, 14157707, 10060,  8845,     0]
+      - ["2000-06", 116.2, 12977249,  9971,  9286,     0]
+      - ["2002-06", 157.0, 14693313,  8855,  9949,     0]
+      - ["2005-06", 247.8, 22193683,  8276,     0, 11845]
+      - ["2008-10", 326.7, 28636743,  8443,     0, 16448]
+      - ["2010-06", 272.1, 24497503,  7929,     0, 13682]
+      - ["2015-06", 276.8, 23745876,  8324, 11998,     0]
+      - ["2020-06", 364.7, 28893871,  8945, 17643,     0]
+      - ["2026-01", 408.0, 30353678, 22527, 18091,     0]
+  phase_2b_layout:
+    probed_months: ["2000-06", "2010-06", "2020-06"]
+    schema: [timestamp, open, high, low, close, volume, ticker]
+    compression: snappy
+    row_group_rows: 1048576
+    ticker_column_has_statistics: true
+    sorted_by_ticker: false
+    row_groups_matching_qqq_fraction: 1.0     # every row group spans the full alphabet
+    finding: "unsorted ticker column -> row-group pruning impossible"
+  transfer_estimate:
+    repo_total_gb: 87.7                        # 411 monthly files, 1992-01..2026-03
+    extract_range: "1999-01..2026-03"
+    extract_range_files: 327
+    extract_range_gb: 84.06                    # exact, from HF API file-size metadata
+    per_mode_gb: {download: 84.06, remote: 84.06, stream: 84.06}
+    recommended_mode: download
+    reason: "all modes move ~full repo (no pruning); download has least overhead"
+  upgrade_path:
+    source: "FirstRate Data"
+    detail: "1-minute, split & dividend adjusted, from 2000-01; paid; avoids the 84 GB scrape"
+
+models:
+  - id: garch
+    spec: "GARCH(1,1)"
+    aggregation: closed_form
+    variance_targeting: true
+  - id: egarch
+    spec: "EGARCH(1,1)"
+    aggregation: monte_carlo
+    n_paths: 10000
+    variance_targeting: false
+  - id: gjr
+    spec: "GJR-GARCH(1,1,1)"
+    aggregation: closed_form
+    variance_targeting: true
+  - id: ewma
+    spec: "RiskMetrics EWMA"
+    lambda: 0.94
+    aggregation: identity            # IGARCH, phi = 1, flat term structure
+  - id: rv
+    spec: "trailing realized variance"
+    aggregation: direct
+  - id: har
+    spec: "HAR-RV (Corsi 2009)"
+    aggregation: direct_h_regression
+    target: log_rv
+  - id: rfsv
+    spec: "rough fractional stochastic volatility"
+    aggregation: prediction_formula_with_lognormal_correction
+    hurst_estimator: variogram
+
+estimation:
+  window: expanding
+  min_observations: 1000
+  refit_at: every_rebalance_date
+  information_set: through_t_only    # look-ahead is a hard failure
+  innovations:
+    primary: skewed_t
+    robustness: gaussian_qml
+  persist_parameter_path: true
+
+benchmarks:
+  - id: buy_and_hold
+    description: "full equity exposure, no cash leg"
+  - id: constant_leverage_expost
+    description: "fixed multiple matching 20% full-sample realized vol; infeasible"
+  - id: trailing_rv21
+    description: "size on RV_t(21) directly; the rung every model must beat"
+  - id: unconditional_vol
+    description: "expanding-mean variance"
+
+evaluation:
+  layer1:
+    loss_functions: [qlike, mse]     # Patton (2011) robust; never mae or r2
+    primary_sample: non_overlapping_monthly
+    secondary_sample: overlapping_daily
+    hac_lags: 25
+    tests: [diebold_mariano, model_confidence_set, mincer_zarnowitz]
+    mcs_confidence: 0.90
+  layer2:
+    primary_metric: target_adherence
+    metrics:
+      - realized_vol_vs_target
+      - mad_rolling21_vol_from_target
+      - sharpe_excess_of_cash
+      - max_drawdown
+      - skew
+      - kurtosis
+      - calmar
+      - sortino
+      - turnover
+      - cost_drag
+      - leverage_distribution
+      - pct_months_at_cap
+      - financing_decomposition
+      - regt_maintenance_breaches
+    sharpe_tests: [ledoit_wolf_2008, deflated_sharpe]
+    regt_maintenance_equity: 0.25
+  subperiods:
+    - {label: "2000-2002", start: "2000-01-03", end: "2002-12-31"}
+    - {label: "2003-2007", start: "2003-01-01", end: "2007-12-31"}
+    - {label: "2008-2009", start: "2008-01-01", end: "2009-12-31"}
+    - {label: "2010-2019", start: "2010-01-01", end: "2019-12-31"}
+    - {label: "2020",      start: "2020-01-01", end: "2020-12-31"}
+    - {label: "2022",      start: "2022-01-01", end: "2022-12-31"}
+    - {label: "2023-now",  start: "2023-01-01", end: null}
+  cross_layer:
+    report_rank_correlation: true
+
+# Run ONLY after the main study is complete. Report every cell, including the
+# ones that hurt. Each configuration counts toward the deflated Sharpe trial
+# count.
+sensitivity:
+  enabled: false
+  target_vol: [0.10, 0.15, 0.20, 0.25]
+  leverage_cap: [1.5, 2.0, 3.0]
+  borrow_spread: [0.0000, 0.0050, 0.0150]
+  transaction_cost_round_trip: [0.0002, 0.0005]
+
+output:
+  figures_dir: outputs/figures
+  animations_dir: outputs/animations
+  tables_dir: outputs/tables
+  reports_dir: reports
+  animations:
+    - id: vol_surface
+      content: qqq_realized_vol_by_tenor
+      direction: backward_looking_only
+      overlay_model_forecast_term_structure: true
+    - id: strategy_performance
+    - id: account_balance_by_strategy
+    - id: rolling_sharpe_by_strategy

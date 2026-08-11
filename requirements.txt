@@ -1,0 +1,19 @@
+# Environment for the vol-targeted QQQ study.
+# Pinned to the versions installed 2026-08-06 (Python 3.13.13).
+# Recreate with:  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+pandas==3.0.5
+numpy==2.5.1
+pyarrow==25.0.0
+matplotlib==3.11.1
+huggingface_hub==1.26.1
+datasets==5.0.1
+arch==8.0.0
+statsmodels==0.14.6
+scipy==1.18.0
+pandas_market_calendars==5.4.0
+pyyaml==6.0.3
+pytest==9.1.1
+pillow==12.3.0        # PillowWriter, the GIF animation writer (scripts/build_animations.py)
+# Daily-data acquisition (fallback path). yfinance pulls curl_cffi transitively.
+yfinance==1.5.2
+pandas-datareader==0.11.1
